@@ -64,9 +64,42 @@ class VectorDB:
         self._save_bm25()
 
     def search(self, query: str, n_results: int = 5):
+        if not self.corpus:
+            return []
+
+        # Dense search
         query_embedding = get_embedding(query)
-        results = self.collection.query(
+        dense_results = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=n_results
+            n_results=len(self.corpus)
         )
-        return results["documents"][0]
+        dense_ids = dense_results["ids"][0]
+        
+        # Sparse search (BM25)
+        tokenized_query = query.split(" ")
+        bm25_scores = self.bm25.get_scores(tokenized_query)
+        bm25_ranked = sorted(
+            [(self.corpus[i]['id'], score) for i, score in enumerate(bm25_scores)],
+            key=lambda x: x[1], reverse=True
+        )
+        
+        # RRF
+        k = 60
+        rrf_scores = {}
+        
+        for rank, doc_id in enumerate(dense_ids):
+            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1 / (k + rank + 1)
+            
+        for rank, (doc_id, _) in enumerate(bm25_ranked):
+            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1 / (k + rank + 1)
+            
+        sorted_docs = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:n_results]
+        
+        final_chunks = []
+        for doc_id, _ in sorted_docs:
+            for item in self.corpus:
+                if item['id'] == doc_id:
+                    final_chunks.append(item['text'])
+                    break
+                    
+        return final_chunks
