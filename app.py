@@ -5,8 +5,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import config
 from vector_db import VectorDB
-from llm import generate_answer_stream
-from document_processor import extract_text_from_pdf, chunk_text
+from llm import generate_answer_stream, generate_hypothetical_questions
+from document_processor import extract_text_and_metadata_from_pdf, chunk_text_with_context
 import shutil
 
 app = FastAPI()
@@ -49,8 +49,12 @@ async def upload_pdf(file: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
-    text = extract_text_from_pdf(file_path)
-    chunks = chunk_text(text, config.CHUNK_SIZE, config.CHUNK_OVERLAP)
+    pages = extract_text_and_metadata_from_pdf(file_path)
+    chunks = chunk_text_with_context(pages, config.CHUNK_SIZE, config.CHUNK_OVERLAP)
+    
+    for i, chunk in enumerate(chunks):
+        chunk["hypothetical_questions"] = generate_hypothetical_questions(chunk["text"])
+        
     db.add_chunks(chunks, file.filename)
     
     return {"status": "success", "chunks": len(chunks)}

@@ -93,13 +93,28 @@ class VectorDB:
         for rank, (doc_id, _) in enumerate(bm25_ranked):
             rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1 / (k + rank + 1)
             
-        sorted_docs = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:n_results]
+        # Retrieve top 15 from RRF for reranking
+        sorted_docs = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:15]
         
-        final_chunks = []
+        pre_rerank_chunks = []
         for doc_id, _ in sorted_docs:
             for item in self.corpus:
                 if item['id'] == doc_id:
-                    final_chunks.append(item['text'])
+                    pre_rerank_chunks.append(item['text'])
                     break
                     
+        if not pre_rerank_chunks:
+            return []
+
+        # Rerank
+        from sentence_transformers import CrossEncoder
+        if not hasattr(self, 'reranker'):
+            self.reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+
+        pairs = [[query, chunk] for chunk in pre_rerank_chunks]
+        rerank_scores = self.reranker.predict(pairs)
+        
+        reranked = sorted(zip(pre_rerank_chunks, rerank_scores), key=lambda x: x[1], reverse=True)
+        final_chunks = [chunk for chunk, score in reranked[:n_results]]
+        
         return final_chunks
