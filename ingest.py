@@ -1,8 +1,9 @@
 import sys
 import os
 import config
-from document_processor import extract_text_from_pdf, chunk_text
+from document_processor import extract_text_and_metadata_from_pdf, chunk_text_with_context
 from vector_db import VectorDB
+from llm import generate_hypothetical_questions
 
 def main(pdf_path: str):
     if not os.path.exists(pdf_path):
@@ -10,12 +11,18 @@ def main(pdf_path: str):
         return
 
     print(f"Processing {pdf_path}...")
-    text = extract_text_from_pdf(pdf_path)
+    pages = extract_text_and_metadata_from_pdf(pdf_path)
     
-    print("Chunking text...")
-    chunks = chunk_text(text, config.CHUNK_SIZE, config.CHUNK_OVERLAP)
+    print("Chunking text with context...")
+    chunks = chunk_text_with_context(pages, config.CHUNK_SIZE, config.CHUNK_OVERLAP)
     
-    print(f"Generated {len(chunks)} chunks. Adding to Vector DB...")
+    print(f"Generated {len(chunks)} chunks. Generating Reverse-HyDE questions...")
+    for i, chunk in enumerate(chunks):
+        questions = generate_hypothetical_questions(chunk["text"])
+        chunk["hypothetical_questions"] = questions
+        print(f"Processed chunk {i+1}/{len(chunks)}")
+        
+    print("Adding to Vector DB & BM25...")
     db = VectorDB()
     doc_id = os.path.basename(pdf_path)
     db.add_chunks(chunks, doc_id)

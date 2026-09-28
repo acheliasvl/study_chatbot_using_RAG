@@ -2,6 +2,18 @@ import requests
 import json
 import config
 
+def generate_hypothetical_questions(chunk_text: str) -> str:
+    prompt = f"Generate 3 hypothetical questions that this text can answer. Output only the questions:\n\n{chunk_text}"
+    url = f"{config.OLLAMA_API_URL}/generate"
+    payload = {
+        "model": config.LLM_MODEL,
+        "prompt": prompt,
+        "stream": False
+    }
+    response = requests.post(url, json=payload)
+    response.raise_for_status()
+    return response.json().get("response", "")
+
 def generate_answer_stream(prompt: str):
     url = f"{config.OLLAMA_API_URL}/generate"
     payload = {
