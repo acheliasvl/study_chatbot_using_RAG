@@ -4,6 +4,7 @@ import requests
 
 import config
 
+import re
 
 def check_ollama() -> list[str]:
     """Return a list of problems (empty list = all good)."""
@@ -21,19 +22,64 @@ def check_ollama() -> list[str]:
     return problems
 
 
-def generate_hypothetical_questions(chunk_text: str, n: int = 3) -> str:
-    """Reverse-HyDE: questions this chunk could answer. Embedded together with the chunk."""
+def generate_hypothetical_questions(
+    chunk_text: str,
+    chunk_id: int,
+    n: int = 3
+) -> list[dict]:
+    """Generate individual Reverse-HyDE questions for a chunk."""
+
     prompt = (
-        f"Generate {n} hypothetical questions that this text can answer. "
-        f"Output only the questions, one per line:\n\n{chunk_text}"
+        f"Generate {n} different hypothetical questions that this text can answer.\n"
+        f"Each question should resemble a realistic question a student might ask.\n"
+        f"Output only the questions, one per line.\n\n"
+        f"{chunk_text}"
     )
+
     response = requests.post(
         f"{config.OLLAMA_API_URL}/generate",
-        json={"model": config.LLM_MODEL, "prompt": prompt, "stream": False},
+        json={
+            "model": config.LLM_MODEL,
+            "prompt": prompt,
+            "stream": False
+        },
         timeout=300,
     )
+
     response.raise_for_status()
-    return response.json().get("response", "").strip()
+
+    raw = response.json().get("response", "").strip()
+
+    # Convert model output into individual questions
+    questions = [
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip()
+    ]
+
+    # Remove numbering such as "1.", "2.", "- "
+    cleaned = []
+
+    for question in questions:
+        question = re.sub(
+            r"^\s*(?:[-•*]|\d+[.)])\s*",
+            "",
+            question
+        ).strip()
+
+        if question:
+            cleaned.append(question)
+
+    # Keep only the requested number
+    cleaned = cleaned[:n]
+
+    return [
+        {
+            "question_id": f"{chunk_id}_q{i}",
+            "question": question
+        }
+        for i, question in enumerate(cleaned, start=1)
+    ]
 
 
 def generate_answer_stream(prompt: str):

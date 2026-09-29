@@ -48,8 +48,16 @@ def ingest_pdf(db: VectorDB, path: str):
 
     if config.USE_REVERSE_HYDE:
         for i, chunk in enumerate(chunks, 1):
-            chunk["questions"] = generate_hypothetical_questions(chunk["text"], config.HYDE_NUM_QUESTIONS)
-            print(f"\r  reverse-HyDE questions {i}/{len(chunks)}", end="", flush=True)
+            chunk["questions"] = generate_hypothetical_questions(
+                chunk["text"],
+                chunk["metadata"]["chunk_id"],
+                config.HYDE_NUM_QUESTIONS
+            )
+            print(
+                f"\r  reverse-HyDE questions {i}/{len(chunks)}",
+                end="",
+                flush=True
+            )
         print()
 
     def progress(done, total):

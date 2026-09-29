@@ -6,3 +6,4 @@ __pycache__/
 *$py.class
 .env
 .DS_Store
+inspect_chunks.py

@@ -56,25 +56,73 @@ class VectorDB:
         self._rebuild_bm25()
 
     def add_chunks(self, chunks: list[dict], path: str, on_progress=None):
-        """Embed every chunk (+ its hypothetical questions), then store all at once.
-        Embeddings are computed first so a failure leaves the DB untouched."""
-        doc_key = hashlib.md5(path.encode()).hexdigest()[:8]  # same filename in two folders = no id clash
-        ids, docs, embeddings, metas = [], [], [], []
+        """
+        Embed every chunk together with its Reverse-HyDE questions
+        and store the chunk + structured metadata in ChromaDB.
+        """
+
+        doc_key = hashlib.md5(path.encode()).hexdigest()[:8]
+
+        ids = []
+        docs = []
+        embeddings = []
+        metas = []
+
         for i, chunk in enumerate(chunks):
-            questions = chunk.get("questions", "")
-            embed_input = chunk["text"] + (f"\n\nQuestions:\n{questions}" if questions else "")
+
+            questions = chunk.get("questions", [])
+
+            # Convert structured questions into text for embedding
+            question_text = "\n".join(
+                q["question"] for q in questions
+            )
+
+            embed_input = chunk["text"]
+
+            if question_text:
+                embed_input += (
+                    f"\n\nHypothetical questions:\n"
+                    f"{question_text}"
+                )
+
+            chunk_id = chunk["metadata"].get("chunk_id", i)
+
             ids.append(f"{doc_key}_{i}")
+
             docs.append(chunk["text"])
-            embeddings.append(get_embedding(embed_input))
-            metas.append({**chunk["metadata"], "path": path, "chunk": i, "questions": questions})
+
+            embeddings.append(
+                get_embedding(embed_input)
+            )
+
+            metas.append({
+                **chunk["metadata"],
+                "path": path,
+                "chunk": i,
+
+                # Keep structured questions in metadata
+                "questions": question_text,
+
+                # Number of generated questions
+                "question_count": len(questions),
+
+                # IDs of the generated questions
+                "question_ids": ",".join(
+                    q["question_id"] for q in questions
+                )
+            })
+
             if on_progress:
                 on_progress(i + 1, len(chunks))
 
-        for s in range(0, len(ids), 500):  # Chroma has a max batch size
+        for s in range(0, len(ids), 500):
             self.collection.add(
-                ids=ids[s:s + 500], documents=docs[s:s + 500],
-                embeddings=embeddings[s:s + 500], metadatas=metas[s:s + 500],
+                ids=ids[s:s + 500],
+                documents=docs[s:s + 500],
+                embeddings=embeddings[s:s + 500],
+                metadatas=metas[s:s + 500],
             )
+
         self._rebuild_bm25()
 
     # ── retrieval ─────────────────────────────────────────────────────────────

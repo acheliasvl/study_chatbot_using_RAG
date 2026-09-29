@@ -68,23 +68,23 @@ def chunk_by_topics(
     overlap: int
 ) -> list[dict]:
     """
-    Create topic-aware chunks.
+    Create topic-aware chunks from structured PDF text.
+
+    Each chunk contains:
+        - chunk_id
+        - title
+        - section
+        - context
+        - source
+        - page
 
     Headings are detected using:
-      - larger-than-normal font size
-      - bold text
-      - common heading patterns such as:
-          1.
-          1.1
-          1.1.1
-          Chapter 1
-          Section 2
-          etc.
+        - numbered heading patterns
+        - Chapter / Section patterns
+        - larger font size
+        - bold text
 
-    Text belonging to the same topic stays together.
-
-    If a topic is larger than chunk_size, it is split into
-    smaller overlapping chunks.
+    Large topics are split into smaller overlapping chunks.
     """
 
     if overlap >= chunk_size:
@@ -92,25 +92,38 @@ def chunk_by_topics(
             "CHUNK_OVERLAP must be smaller than CHUNK_SIZE"
         )
 
+    import re
+
     # ---------------------------------------------------------
-    # STEP 1 — Flatten blocks and calculate normal font size
+    # STEP 1 — Flatten PDF blocks
     # ---------------------------------------------------------
 
     all_blocks = []
 
     for page in pages:
+
         for block in page["blocks"]:
 
             lines = []
 
             for line in block:
-                text = " ".join(span["text"] for span in line).strip()
+
+                text = " ".join(
+                    span["text"] for span in line
+                ).strip()
 
                 if not text:
                     continue
 
-                sizes = [span["size"] for span in line]
-                bold = any(span["bold"] for span in line)
+                sizes = [
+                    span["size"]
+                    for span in line
+                ]
+
+                bold = any(
+                    span["bold"]
+                    for span in line
+                )
 
                 lines.append({
                     "text": text,
@@ -127,7 +140,10 @@ def chunk_by_topics(
     if not all_blocks:
         return []
 
-    # Normal body-text size
+    # ---------------------------------------------------------
+    # STEP 2 — Calculate normal body font size
+    # ---------------------------------------------------------
+
     all_sizes = []
 
     for block in all_blocks:
@@ -139,12 +155,51 @@ def chunk_by_topics(
     median_size = all_sizes[len(all_sizes) // 2]
 
     # ---------------------------------------------------------
-    # STEP 2 — Detect headings
+    # STEP 3 — Heading detection
     # ---------------------------------------------------------
 
-    import re
+    def heading_level(text: str) -> int | None:
+
+        # Ignore bullets
+        if text in {"•", "-", "–", "—", "*"}:
+            return None
+
+        # Ignore very long lines
+        if len(text) > 150:
+            return None
+
+        # Chapter 1 / Chapter One
+        if re.match(
+            r"^chapter\s+\w+",
+            text,
+            re.IGNORECASE
+        ):
+            return 1
+
+        # Section 1 / Section 1.2
+        if re.match(
+            r"^section\s+\d+(\.\d+)*",
+            text,
+            re.IGNORECASE
+        ):
+            return 2
+
+        # 1 Introduction
+        # 1.1 Process Management
+        # 1.1.1 Threads
+        match = re.match(
+            r"^(\d+(?:\.\d+)*)[\.)]?\s+\S+",
+            text
+        )
+
+        if match:
+            number = match.group(1)
+            return number.count(".") + 1
+
+        return None
 
     def looks_like_heading(line: dict) -> bool:
+
         text = line["text"].strip()
         size = line["size"]
         bold = line["bold"]
@@ -152,63 +207,54 @@ def chunk_by_topics(
         if not text:
             return False
 
-        # Avoid treating huge paragraphs as headings
-        if len(text) > 150:
+        # Never treat bullets as headings
+        if text in {"•", "-", "–", "—", "*"}:
             return False
 
-        # Common numbered headings:
-        # 1 Introduction
-        # 1.1 Processes
-        # 1.1.1 Threads
-        numbered = re.match(
-            r"^\d+(\.\d+)*[\.)]?\s+\S+",
-            text
+        # Explicit heading patterns
+        if heading_level(text) is not None:
+            return True
+
+        # Larger font + reasonably short text
+        large_font = (
+            size >= median_size * 1.20
+            and len(text.split()) <= 15
         )
 
-        # Chapter 1, Chapter One, etc.
-        chapter = re.match(
-            r"^(chapter|section)\s+\w+",
-            text,
-            re.IGNORECASE
+        # Bold + short text
+        bold_heading = (
+            bold
+            and len(text.split()) <= 12
         )
 
-        # A significantly larger font is a strong signal
-        large_font = size >= median_size * 1.20
-
-        # Short bold lines are often headings
-        bold_heading = bold and len(text.split()) <= 15
-
-        return bool(
-            numbered
-            or chapter
-            or large_font
-            or bold_heading
-        )
+        return large_font or bold_heading
 
     # ---------------------------------------------------------
-    # STEP 3 — Build topic sections
+    # STEP 4 — Build topics
     # ---------------------------------------------------------
 
     topics = []
 
-    current_topic = None
+    current_title = "Introduction"
+    current_section = "Introduction"
     current_text = []
-
     current_metadata = None
 
     def save_topic():
-        nonlocal current_topic, current_text, current_metadata
 
         if not current_text:
             return
 
-        text = "\n".join(current_text).strip()
+        text = "\n".join(
+            current_text
+        ).strip()
 
         if not text:
             return
 
         topics.append({
-            "topic": current_topic,
+            "title": current_title,
+            "section": current_section,
             "text": text,
             "metadata": dict(current_metadata)
         })
@@ -219,30 +265,47 @@ def chunk_by_topics(
 
         for line in block["lines"]:
 
-            text = line["text"]
+            text = line["text"].strip()
 
             if looks_like_heading(line):
 
                 # Save previous topic
                 save_topic()
 
-                # Start new topic
-                current_topic = text
+                # Determine heading level
+                level = heading_level(text)
+
+                # If it is an explicit numbered heading,
+                # use it as the new section/title.
+                if level == 1:
+
+                    current_section = text
+                    current_title = text
+
+                elif level == 2:
+
+                    current_title = text
+
+                elif level and level >= 3:
+
+                    current_title = text
+
+                else:
+
+                    # Font-based heading
+                    current_title = text
+
                 current_text = []
 
                 current_metadata = {
-                    **page_metadata,
-                    "section": current_topic
+                    **page_metadata
                 }
 
             else:
 
-                # If the document starts with text before
-                # the first detected heading
                 if current_metadata is None:
                     current_metadata = {
-                        **page_metadata,
-                        "section": "Introduction"
+                        **page_metadata
                     }
 
                 current_text.append(text)
@@ -251,49 +314,74 @@ def chunk_by_topics(
     save_topic()
 
     # ---------------------------------------------------------
-    # STEP 4 — Split large topics into chunks
+    # STEP 5 — Create chunks from topics
     # ---------------------------------------------------------
 
     chunks = []
 
+    chunk_id = 0
+
     for topic in topics:
 
         text = topic["text"]
+
+        title = topic["title"]
+        section = topic["section"]
+
         metadata = topic["metadata"]
-        section = topic["topic"] or metadata.get(
-            "section",
-            "Unknown"
+
+        # Context used for retrieval / embedding
+        context = (
+            f"This content is from the section "
+            f"'{section}', specifically the topic "
+            f"'{title}'."
         )
 
         prefix = (
             f"Source: {metadata['source']}\n"
             f"Page: {metadata['page']}\n"
-            f"Section: {section}\n\n"
+            f"Section: {section}\n"
+            f"Title: {title}\n"
+            f"Context: {context}\n\n"
         )
 
-        # If topic fits inside one chunk
+        # -----------------------------------------------------
+        # Topic fits into one chunk
+        # -----------------------------------------------------
+
         if len(text) <= chunk_size:
 
             chunks.append({
                 "text": prefix + text,
-                "metadata": dict(metadata)
+
+                "metadata": {
+                    "source": metadata["source"],
+                    "page": metadata["page"],
+                    "section": section,
+                    "title": title,
+                    "context": context,
+                    "chunk_id": chunk_id
+                }
             })
 
+            chunk_id += 1
             continue
 
         # -----------------------------------------------------
-        # Large topic -> overlapping chunks
+        # Topic is too large → split it
         # -----------------------------------------------------
 
         start = 0
 
         while start < len(text):
 
-            end = min(start + chunk_size, len(text))
+            end = min(
+                start + chunk_size,
+                len(text)
+            )
 
             if end < len(text):
 
-                # Prefer paragraph/line boundary
                 cut = max(
                     text.rfind("\n", start, end),
                     text.rfind(" ", start, end)
@@ -308,26 +396,31 @@ def chunk_by_topics(
 
                 chunks.append({
                     "text": prefix + piece,
-                    "metadata": dict(metadata)
+
+                    "metadata": {
+                        "source": metadata["source"],
+                        "page": metadata["page"],
+                        "section": section,
+                        "title": title,
+                        "context": context,
+                        "chunk_id": chunk_id
+                    }
                 })
+
+                chunk_id += 1
 
             if end >= len(text):
                 break
 
             start = end - overlap
 
-            # Move to next word boundary
-            next_space = text.find(" ", start, end)
+            next_space = text.find(
+                " ",
+                start,
+                end
+            )
 
             if next_space != -1:
                 start = next_space + 1
-
-    # ---------------------------------------------------------
-    # STEP 5 — Add chunk IDs
-    # ---------------------------------------------------------
-
-    for i, chunk in enumerate(chunks):
-
-        chunk["metadata"]["chunk_id"] = i
 
     return chunks
