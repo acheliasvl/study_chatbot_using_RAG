@@ -1,0 +1,11 @@
+{
+  "96a5f303-f9ae-4e5f-a8ee-6e09a96ca1bf": {
+    "name": "Chat 1",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello, i am starting a new conversation. This will be used for the course Human Computer interaction."
+      }
+    ]
+  }
+}

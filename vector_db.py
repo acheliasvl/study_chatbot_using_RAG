@@ -63,23 +63,40 @@ class VectorDB:
         self.bm25 = BM25Okapi(tokenized_corpus)
         self._save_bm25()
 
-    def search(self, query: str, n_results: int = 5):
+    def search(self, query: str, n_results: int = 5, conversation_id: str = None):
         if not self.corpus:
+            return []
+
+        # Filter corpus by conversation_id if provided
+        if conversation_id:
+            filtered_corpus = [item for item in self.corpus if item['metadata'].get('conversation_id') == conversation_id]
+        else:
+            filtered_corpus = self.corpus
+
+        if not filtered_corpus:
             return []
 
         # Dense search
         query_embedding = get_embedding(query)
-        dense_results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=len(self.corpus)
-        )
+        where_filter = {"conversation_id": {"$eq": conversation_id}} if conversation_id else None
+        dense_query_kwargs = {
+            "query_embeddings": [query_embedding],
+            "n_results": len(filtered_corpus)
+        }
+        if where_filter:
+            dense_query_kwargs["where"] = where_filter
+
+        dense_results = self.collection.query(**dense_query_kwargs)
         dense_ids = dense_results["ids"][0]
         
-        # Sparse search (BM25)
+        # Sparse search (BM25) on filtered corpus
         tokenized_query = query.split(" ")
-        bm25_scores = self.bm25.get_scores(tokenized_query)
+        filtered_tokenized = [item['text'].split(" ") for item in filtered_corpus]
+        from rank_bm25 import BM25Okapi as _BM25
+        filtered_bm25 = _BM25(filtered_tokenized)
+        bm25_scores = filtered_bm25.get_scores(tokenized_query)
         bm25_ranked = sorted(
-            [(self.corpus[i]['id'], score) for i, score in enumerate(bm25_scores)],
+            [(filtered_corpus[i]['id'], score) for i, score in enumerate(bm25_scores)],
             key=lambda x: x[1], reverse=True
         )
         
@@ -98,7 +115,7 @@ class VectorDB:
         
         pre_rerank_chunks = []
         for doc_id, _ in sorted_docs:
-            for item in self.corpus:
+            for item in filtered_corpus:
                 if item['id'] == doc_id:
                     pre_rerank_chunks.append(item['text'])
                     break

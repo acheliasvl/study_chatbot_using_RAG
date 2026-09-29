@@ -11,16 +11,22 @@
     <div class="app-container">
         <!-- Sidebar -->
         <div class="sidebar">
-            <button id="clear-btn" class="icon-btn" title="Clear Conversation">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path></svg>
-                <span>Clear</span>
+            <button id="new-chat-btn" class="icon-btn" title="New Conversation">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                <span>New</span>
             </button>
+
+            <div class="sidebar-divider"></div>
+
+            <div id="conversation-list" class="conversation-list">
+                <!-- Conversation buttons injected here -->
+            </div>
         </div>
 
         <!-- Main Content -->
         <div class="main-content">
             <header>
-                <div class="date-header">Sept 28, 2026</div>
+                <div class="date-header" id="date-header"></div>
                 <h1 class="welcome-text">Welcome.</h1>
                 <p class="subtitle">A new day, take good care of yourself ❤️</p>
             </header>
