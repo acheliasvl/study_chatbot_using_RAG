@@ -1,137 +1,132 @@
-import chromadb
-import config
+import hashlib
 import os
-import pickle
+import re
+
+import chromadb
 from rank_bm25 import BM25Okapi
+
+import config
 from embeddings import get_embedding
 
+
+def tokenize(text: str) -> list[str]:
+    """Lowercase word tokens for BM25."""
+    return re.findall(r"\w+", text.lower())
+
+
 class VectorDB:
+    """Hybrid retrieval: dense (ChromaDB) + sparse (BM25) -> RRF -> cross-encoder rerank.
+
+    ChromaDB is the single source of truth. The BM25 index is rebuilt from it
+    on start and after every add/delete, so there are no extra files to keep in sync.
+    """
+
     def __init__(self):
+        os.makedirs(config.DB_DIR, exist_ok=True)
         self.client = chromadb.PersistentClient(path=config.DB_DIR)
-        self.collection = self.client.get_or_create_collection(name="study_materials")
-        self.bm25_path = os.path.join(config.DB_DIR, "bm25_index.pkl")
-        self.chunks_path = os.path.join(config.DB_DIR, "bm25_chunks.pkl")
-        self.bm25 = None
-        self.corpus = []
-        self._load_bm25()
+        self.collection = self.client.get_or_create_collection(
+            name="documents", metadata={"hnsw:space": "cosine"}
+        )
+        self.reranker = None
+        self.last_trace = {}   # per-stage results of the last search (for /verbose)
+        self._rebuild_bm25()
 
-    def _load_bm25(self):
-        if os.path.exists(self.bm25_path) and os.path.exists(self.chunks_path):
-            with open(self.bm25_path, 'rb') as f:
-                self.bm25 = pickle.load(f)
-            with open(self.chunks_path, 'rb') as f:
-                self.corpus = pickle.load(f)
+    # ── index management ──────────────────────────────────────────────────────
+    def _rebuild_bm25(self):
+        data = self.collection.get(include=["documents", "metadatas"])
+        self.ids, self.docs, self.metas = data["ids"], data["documents"], data["metadatas"]
+        self.pos = {id_: i for i, id_ in enumerate(self.ids)}
+        self.bm25 = BM25Okapi([tokenize(d) for d in self.docs]) if self.docs else None
 
-    def _save_bm25(self):
-        with open(self.bm25_path, 'wb') as f:
-            pickle.dump(self.bm25, f)
-        with open(self.chunks_path, 'wb') as f:
-            pickle.dump(self.corpus, f)
+    def count(self) -> int:
+        return len(self.ids)
 
-    def add_chunks(self, chunks: list[dict], doc_id: str):
-        ids = []
-        documents = []
-        embeddings = []
-        metadatas = []
-        
+    def list_documents(self) -> list[dict]:
+        docs = {}
+        for m in self.metas:
+            d = docs.setdefault(m["path"], {"path": m["path"], "source": m["source"], "chunks": 0})
+            d["chunks"] += 1
+        return list(docs.values())
+
+    def has_document(self, path: str) -> bool:
+        return any(m["path"] == path for m in self.metas)
+
+    def delete_document(self, path: str):
+        self.collection.delete(where={"path": path})
+        self._rebuild_bm25()
+
+    def add_chunks(self, chunks: list[dict], path: str, on_progress=None):
+        """Embed every chunk (+ its hypothetical questions), then store all at once.
+        Embeddings are computed first so a failure leaves the DB untouched."""
+        doc_key = hashlib.md5(path.encode()).hexdigest()[:8]  # same filename in two folders = no id clash
+        ids, docs, embeddings, metas = [], [], [], []
         for i, chunk in enumerate(chunks):
-            chunk_id = f"{doc_id}_chunk_{i}"
-            ids.append(chunk_id)
-            
-            combined_text = f"{chunk['text']}\n\nQuestions:\n{chunk['hypothetical_questions']}"
-            documents.append(chunk['text'])
-            embeddings.append(get_embedding(combined_text))
-            
-            meta = chunk['metadata'].copy()
-            meta['hypothetical_questions'] = chunk['hypothetical_questions']
-            metadatas.append(meta)
+            questions = chunk.get("questions", "")
+            embed_input = chunk["text"] + (f"\n\nQuestions:\n{questions}" if questions else "")
+            ids.append(f"{doc_key}_{i}")
+            docs.append(chunk["text"])
+            embeddings.append(get_embedding(embed_input))
+            metas.append({**chunk["metadata"], "path": path, "chunk": i, "questions": questions})
+            if on_progress:
+                on_progress(i + 1, len(chunks))
 
-            self.corpus.append({
-                "id": chunk_id,
-                "text": chunk['text'],
-                "metadata": meta
-            })
+        for s in range(0, len(ids), 500):  # Chroma has a max batch size
+            self.collection.add(
+                ids=ids[s:s + 500], documents=docs[s:s + 500],
+                embeddings=embeddings[s:s + 500], metadatas=metas[s:s + 500],
+            )
+        self._rebuild_bm25()
 
-        self.collection.add(
-            documents=documents,
-            embeddings=embeddings,
-            metadatas=metadatas,
-            ids=ids
-        )
+    # ── retrieval ─────────────────────────────────────────────────────────────
+    def _label(self, id_: str) -> str:
+        m = self.metas[self.pos[id_]]
+        return f"{m['source']} p.{m['page']} #{m['chunk']}"
 
-        tokenized_corpus = [doc['text'].split(" ") for doc in self.corpus]
-        self.bm25 = BM25Okapi(tokenized_corpus)
-        self._save_bm25()
+    def _get_reranker(self):
+        if self.reranker is None:
+            print("(loading reranker, first run downloads it...)")
+            from sentence_transformers import CrossEncoder
+            self.reranker = CrossEncoder(config.RERANK_MODEL)
+        return self.reranker
 
-    def search(self, query: str, n_results: int = 5, conversation_id: str = None):
-        if not self.corpus:
+    def search(self, query: str, top_k: int = None) -> list[dict]:
+        top_k = top_k or config.FINAL_TOP_K
+        self.last_trace = {}
+        if not self.docs:
             return []
 
-        # Filter corpus by conversation_id if provided
-        if conversation_id:
-            filtered_corpus = [item for item in self.corpus if item['metadata'].get('conversation_id') == conversation_id]
-        else:
-            filtered_corpus = self.corpus
+        # 1. Dense: embed query, nearest chunks in ChromaDB
+        n = min(config.DENSE_TOP_K, len(self.ids))
+        res = self.collection.query(query_embeddings=[get_embedding(query)], n_results=n)
+        dense_ids = res["ids"][0]
 
-        if not filtered_corpus:
-            return []
+        # 2. Sparse: BM25 keyword scores over all chunks
+        scores = self.bm25.get_scores(tokenize(query))
+        ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:config.BM25_TOP_K]
+        bm25_ids = [self.ids[i] for i in ranked if scores[i] > 0]
 
-        # Dense search
-        query_embedding = get_embedding(query)
-        where_filter = {"conversation_id": {"$eq": conversation_id}} if conversation_id else None
-        dense_query_kwargs = {
-            "query_embeddings": [query_embedding],
-            "n_results": len(filtered_corpus)
+        # 3. RRF: score = sum over rankings of 1 / (k + rank). Only ranks matter, not raw scores.
+        rrf = {}
+        for ranking in (dense_ids, bm25_ids):
+            for rank, id_ in enumerate(ranking, start=1):
+                rrf[id_] = rrf.get(id_, 0.0) + 1.0 / (config.RRF_K + rank)
+        fused = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:config.RERANK_TOP_N]
+
+        # 4. Rerank: cross-encoder reads (query, chunk) together = slower but more precise
+        pairs = [[query, self.docs[self.pos[id_]]] for id_, _ in fused]
+        rerank_scores = self._get_reranker().predict(pairs)
+        reranked = sorted(
+            zip([id_ for id_, _ in fused], (float(s) for s in rerank_scores)),
+            key=lambda x: x[1], reverse=True,
+        )[:top_k]
+
+        self.last_trace = {
+            "dense":  [(self._label(i), None) for i in dense_ids[:5]],
+            "bm25":   [(self._label(i), None) for i in bm25_ids[:5]],
+            "rrf":    [(self._label(i), s) for i, s in fused[:5]],
+            "rerank": [(self._label(i), s) for i, s in reranked],
         }
-        if where_filter:
-            dense_query_kwargs["where"] = where_filter
-
-        dense_results = self.collection.query(**dense_query_kwargs)
-        dense_ids = dense_results["ids"][0]
-        
-        # Sparse search (BM25) on filtered corpus
-        tokenized_query = query.split(" ")
-        filtered_tokenized = [item['text'].split(" ") for item in filtered_corpus]
-        from rank_bm25 import BM25Okapi as _BM25
-        filtered_bm25 = _BM25(filtered_tokenized)
-        bm25_scores = filtered_bm25.get_scores(tokenized_query)
-        bm25_ranked = sorted(
-            [(filtered_corpus[i]['id'], score) for i, score in enumerate(bm25_scores)],
-            key=lambda x: x[1], reverse=True
-        )
-        
-        # RRF
-        k = 60
-        rrf_scores = {}
-        
-        for rank, doc_id in enumerate(dense_ids):
-            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1 / (k + rank + 1)
-            
-        for rank, (doc_id, _) in enumerate(bm25_ranked):
-            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1 / (k + rank + 1)
-            
-        # Retrieve top 15 from RRF for reranking
-        sorted_docs = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:15]
-        
-        pre_rerank_chunks = []
-        for doc_id, _ in sorted_docs:
-            for item in filtered_corpus:
-                if item['id'] == doc_id:
-                    pre_rerank_chunks.append(item['text'])
-                    break
-                    
-        if not pre_rerank_chunks:
-            return []
-
-        # Rerank
-        from sentence_transformers import CrossEncoder
-        if not hasattr(self, 'reranker'):
-            self.reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-
-        pairs = [[query, chunk] for chunk in pre_rerank_chunks]
-        rerank_scores = self.reranker.predict(pairs)
-        
-        reranked = sorted(zip(pre_rerank_chunks, rerank_scores), key=lambda x: x[1], reverse=True)
-        final_chunks = [chunk for chunk, score in reranked[:n_results]]
-        
-        return final_chunks
+        return [
+            {"text": self.docs[self.pos[i]], "metadata": self.metas[self.pos[i]], "score": s}
+            for i, s in reranked
+        ]

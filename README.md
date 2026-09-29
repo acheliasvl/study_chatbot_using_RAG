@@ -1,31 +1,42 @@
-# Study Assistant: Advanced RAG Learning Project
+# Terminal RAG Study Assistant
 
-## Objective
-Project built to learn and implement Advanced Retrieval-Augmented Generation (RAG) techniques. Evaluates local LLMs and embedding models for document Q&A.
+Terminal only. No server, no frontend, no conversation IDs. Give a PDF path, ask questions.
 
-## Pipeline Architecture
+## Run
+```
+pip install -r requirements.txt
+ollama pull qwen2.5:7b-instruct
+ollama pull embeddinggemma
+python main.py                      # start chat
+python main.py notes.pdf lectures/  # index PDFs / folders first
+```
+In chat: `/add <path>`  `/docs`  `/verbose`  `/help`  `/quit`
 
-### 1. Indexing Phase
-* **PDF Extraction**: Extracts text, page numbers, and source metadata.
-* **Contextual Chunking**: Prefixes metadata (source, page) to chunks to preserve context.
-* **Reverse-HyDE**: Uses Qwen2.5 to generate 3 hypothetical questions per chunk during indexing. Shifts computation from query-time to index-time.
-* **Embedding**: Embeds combined chunk text and hypothetical questions using Gemma.
-* **Storage**: Stores Dense embeddings in ChromaDB and Sparse tokenized text in BM25 index.
+Delete the old `chroma_db/` folder from the previous version before first run.
+First question downloads the reranker model once (needs internet).
 
-### 2. Query & Retrieval Phase
-* **Hybrid Search**: Embeds user query. Searches ChromaDB (Dense) and BM25 (Sparse) concurrently.
-* **Reciprocal Rank Fusion (RRF)**: Combines Dense and Sparse results mathematically (k=60) to normalize scores.
-* **Reranking**: Passes top 15 RRF results through `CrossEncoder` (`ms-marco-MiniLM-L-6-v2`) for semantic precision reranking.
-* **Generation**: Top 3 reranked chunks fed to Qwen2.5 for final answer synthesis.
+## Pipeline
+**Index** (`/add`)
+1. `document_processor.py`: PyMuPDF text per page -> overlapping chunks, each prefixed `Source: file, Page: n`
+2. `llm.py`: Reverse-HyDE, LLM writes 3 questions per chunk
+3. `embeddings.py`: embed chunk + questions
+4. `vector_db.py`: store in ChromaDB. BM25 index rebuilt from Chroma.
 
-## File Breakdown
+**Query**
+1. dense search (ChromaDB, top 20) + BM25 (top 20)
+2. Reciprocal Rank Fusion, k=60, keep top 15
+3. CrossEncoder rerank, keep top 3
+4. Qwen answers from those 3 chunks, streamed, with sources
 
-* `app.py`: FastAPI web server. Manages `/upload` (triggers ingestion) and `/chat` (triggers retrieval/generation) routes.
-* `document_processor.py`: Uses `PyMuPDF` (`fitz`). Extracts raw text + metadata. Splits text into contextualized chunks.
-* `vector_db.py`: Core retrieval engine. Manages ChromaDB client, BM25 pickling, Hybrid Search logic, RRF computation, and CrossEncoder reranking.
-* `llm.py`: Interfaces with Ollama API for Qwen2.5. Handles answer streaming and Reverse-HyDE question generation.
-* `embeddings.py`: Interfaces with Ollama API for Gemma embeddings.
-* `ingest.py`: Standalone CLI script for PDF ingestion pipeline.
-* `chat.py`: Standalone CLI script for interactive terminal chat.
-* `config.py`: Centralized configuration (model names, chunk sizes, DB paths).
-* `requirements.txt`: Python dependencies (`fastapi`, `chromadb`, `rank_bm25`, `sentence-transformers`, `pymupdf`).
+Use `/verbose` to see each stage's ranking. Tune everything in `config.py`
+(`USE_REVERSE_HYDE = False` = much faster indexing, to compare recall).
+
+## Files
+| file | job |
+|---|---|
+| `main.py` | terminal loop, commands, prompt building |
+| `document_processor.py` | PDF extraction, chunking |
+| `vector_db.py` | ChromaDB, BM25, RRF, rerank |
+| `llm.py` | Ollama: answers, HyDE questions, health check |
+| `embeddings.py` | Ollama embeddings |
+| `config.py` | models, chunk sizes, retrieval params |

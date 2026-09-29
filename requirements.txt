@@ -3,5 +3,3 @@ chromadb
 requests
 rank_bm25
 sentence-transformers
-fastapi
-uvicorn
