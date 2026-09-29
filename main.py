@@ -10,7 +10,7 @@ import os
 import sys
 
 import config
-from document_processor import chunk_pages, extract_pages
+from document_processor import chunk_by_topics, extract_pages
 from llm import check_ollama, generate_answer_stream, generate_hypothetical_questions
 from vector_db import VectorDB
 
@@ -39,7 +39,11 @@ def ingest_pdf(db: VectorDB, path: str):
         print("  no text found (scanned PDF? needs OCR)")
         return
 
-    chunks = chunk_pages(pages, config.CHUNK_SIZE, config.CHUNK_OVERLAP)
+    chunks = chunk_by_topics(
+    pages,
+    config.CHUNK_SIZE,
+    config.CHUNK_OVERLAP
+    )
     print(f"  {len(pages)} pages -> {len(chunks)} chunks")
 
     if config.USE_REVERSE_HYDE:
