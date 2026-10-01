@@ -195,137 +195,137 @@ class VectorDB:
         return self.reranker
 
     
-def search(self, query: str, top_k: int = None) -> list[dict]:
-    top_k = top_k or config.FINAL_TOP_K
-    self.last_trace = {}
+    def search(self, query: str, top_k: int = None) -> list[dict]:
+        top_k = top_k or config.FINAL_TOP_K
+        self.last_trace = {}
 
-    if not self.docs:
-        return []
+        if not self.docs:
+            return []
 
-    # 1. Embed the query once
-    query_embedding = get_embedding(query)
+        # 1. Embed the query once
+        query_embedding = get_embedding(query)
 
-    # 2. Dense retrieval
-    n = min(config.DENSE_TOP_K, len(self.ids))
+        # 2. Dense retrieval
+        n = min(config.DENSE_TOP_K, len(self.ids))
 
-    res = self.collection.query(
-        query_embeddings=[query_embedding],
-        n_results=n
-    )
-    dense_ids = res["ids"][0]
-
-    # 3. Reverse-HyDE question retrieval
-    question_n = min(
-        config.DENSE_TOP_K,
-        self.question_collection.count()
-    )
-
-    if question_n > 0:
-        question_res = self.question_collection.query(
+        res = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=question_n
+            n_results=n
         )
-        question_results = question_res["metadatas"][0]
-    else:
-        question_results = []
+        dense_ids = res["ids"][0]
 
-    # Map questions to unique original chunks
-    hyde_ids = []
-    seen = set()
+        # 3. Reverse-HyDE question retrieval
+        question_n = min(
+            config.DENSE_TOP_K,
+            self.question_collection.count()
+        )
 
-    for meta in question_results:
-        parent_id = meta["parent_chroma_id"]
-
-        if parent_id in self.pos and parent_id not in seen:
-            hyde_ids.append(parent_id)
-            seen.add(parent_id)
-
-    # 4. Sparse retrieval: BM25
-    scores = self.bm25.get_scores(tokenize(query))
-
-    ranked = sorted(
-        range(len(scores)),
-        key=lambda i: scores[i],
-        reverse=True
-    )[:config.BM25_TOP_K]
-
-    bm25_ids = [
-        self.ids[i]
-        for i in ranked
-        if scores[i] > 0
-    ]
-
-    # 5. RRF fusion
-    rrf = {}
-
-    for ranking in (dense_ids, bm25_ids, hyde_ids):
-        for rank, id_ in enumerate(ranking, start=1):
-            rrf[id_] = rrf.get(id_, 0.0) + (
-                1.0 / (config.RRF_K + rank)
+        if question_n > 0:
+            question_res = self.question_collection.query(
+                query_embeddings=[query_embedding],
+                n_results=question_n
             )
+            question_results = question_res["metadatas"][0]
+        else:
+            question_results = []
 
-    fused = sorted(
-        rrf.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )[:config.RERANK_TOP_N]
+        # Map questions to unique original chunks
+        hyde_ids = []
+        seen = set()
 
-    # 6. Retrieve original chunk texts for reranking
-    candidates = [
-        (id_, self.docs[self.pos[id_]])
-        for id_, _ in fused
-    ]
+        for meta in question_results:
+            parent_id = meta["parent_chroma_id"]
 
-    # 7. CrossEncoder reranking
-    pairs = [
-        [query, text]
-        for _, text in candidates
-    ]
+            if parent_id in self.pos and parent_id not in seen:
+                hyde_ids.append(parent_id)
+                seen.add(parent_id)
 
-    if pairs:
-        rerank_scores = self._get_reranker().predict(pairs)
+        # 4. Sparse retrieval: BM25
+        scores = self.bm25.get_scores(tokenize(query))
 
-        reranked = sorted(
-            zip(
-                [id_ for id_, _ in candidates],
-                (float(s) for s in rerank_scores)
-            ),
+        ranked = sorted(
+            range(len(scores)),
+            key=lambda i: scores[i],
+            reverse=True
+        )[:config.BM25_TOP_K]
+
+        bm25_ids = [
+            self.ids[i]
+            for i in ranked
+            if scores[i] > 0
+        ]
+
+        # 5. RRF fusion
+        rrf = {}
+
+        for ranking in (dense_ids, bm25_ids, hyde_ids):
+            for rank, id_ in enumerate(ranking, start=1):
+                rrf[id_] = rrf.get(id_, 0.0) + (
+                    1.0 / (config.RRF_K + rank)
+                )
+
+        fused = sorted(
+            rrf.items(),
             key=lambda x: x[1],
             reverse=True
-        )[:top_k]
-    else:
-        reranked = []
+        )[:config.RERANK_TOP_N]
 
-    # 8. Save retrieval trace for /verbose
-    self.last_trace = {
-        "dense": [
-            (self._label(i), None)
-            for i in dense_ids[:5]
-        ],
-        "bm25": [
-            (self._label(i), None)
-            for i in bm25_ids[:5]
-        ],
-        "hyde": [
-            (self._label(i), None)
-            for i in hyde_ids[:5]
-        ],
-        "rrf": [
-            (self._label(i), s)
-            for i, s in fused[:5]
-        ],
-        "rerank": [
-            (self._label(i), s)
-            for i, s in reranked
-        ],
-    }
+        # 6. Retrieve original chunk texts for reranking
+        candidates = [
+            (id_, self.docs[self.pos[id_]])
+            for id_, _ in fused
+        ]
 
-    # 9. Return final chunks
-    return [
-        {
-            "text": self.docs[self.pos[i]],
-            "metadata": self.metas[self.pos[i]],
-            "score": s
+        # 7. CrossEncoder reranking
+        pairs = [
+            [query, text]
+            for _, text in candidates
+        ]
+
+        if pairs:
+            rerank_scores = self._get_reranker().predict(pairs)
+
+            reranked = sorted(
+                zip(
+                    [id_ for id_, _ in candidates],
+                    (float(s) for s in rerank_scores)
+                ),
+                key=lambda x: x[1],
+                reverse=True
+            )[:top_k]
+        else:
+            reranked = []
+
+        # 8. Save retrieval trace for /verbose
+        self.last_trace = {
+            "dense": [
+                (self._label(i), None)
+                for i in dense_ids[:5]
+            ],
+            "bm25": [
+                (self._label(i), None)
+                for i in bm25_ids[:5]
+            ],
+            "hyde": [
+                (self._label(i), None)
+                for i in hyde_ids[:5]
+            ],
+            "rrf": [
+                (self._label(i), s)
+                for i, s in fused[:5]
+            ],
+            "rerank": [
+                (self._label(i), s)
+                for i, s in reranked
+            ],
         }
-        for i, s in reranked
-    ]
+
+        # 9. Return final chunks
+        return [
+            {
+                "text": self.docs[self.pos[i]],
+                "metadata": self.metas[self.pos[i]],
+                "score": s
+            }
+            for i, s in reranked
+        ]
